@@ -98,6 +98,8 @@ Componentes adicionales:
   - Detección de banderas rojas (checklist estructurado, no generativo).
   - Interacciones medicamentosas.
   
+  - **Interpretación de resultados de laboratorio** (ver 5.4): comparación contra rangos de referencia pediátricos por edad, no generación libre de "valores normales" por el LLM.
+
   Esto es clave: **todo lo que tenga una respuesta matemática/determinística no debe pasar por el LLM**, solo por lógica programada y verificada. El LLM se usa para razonamiento diferencial, síntesis de literatura y lenguaje natural, no para aritmética clínica.
 
 ### 4.2 Backend
@@ -136,7 +138,27 @@ Componentes adicionales:
 - Nutrición enteral/parenteral pediátrica.
 - Banderas rojas quirúrgicas (invaginación, apendicitis, obstrucción, sangrado GI alto/bajo).
 
-### 5.3 Pipeline de ingestión de conocimiento
+### 5.3 Módulo de interpretación de laboratorios (si el paciente los aporta)
+
+Los laboratorios son opcionales en cada consulta (no todo paciente llega con estudios), pero cuando existen deben integrarse al razonamiento, no ignorarse. Diseño:
+
+- **Entrada**: captura estructurada (no OCR libre de imagen sin validación) — formulario con campos por analito, o carga de PDF/imagen con extracción asistida que el médico **confirma manualmente** antes de que el valor se use clínicamente.
+- **Motor determinístico de interpretación**: cada analito se compara contra tablas de **rangos de referencia pediátricos por edad y sexo** (los rangos normales en niños cambian mucho entre neonato, lactante, escolar y adolescente — no son los mismos que en adulto). El motor solo clasifica: normal / anormal / crítico, no diagnostica.
+- **Analitos prioritarios para gastroenterología pediátrica**:
+  - Hematología: hemograma completo, VSG, PCR (marcadores inflamatorios/infecciosos).
+  - Serología celiaca: anti-transglutaminasa IgA (tTG-IgA) + IgA total (para descartar déficit de IgA que invalida el resultado).
+  - Calprotectina fecal (marcador clave de inflamación intestinal, distingue orgánico de funcional).
+  - Panel hepático: AST, ALT, GGT, fosfatasa alcalina, bilirrubina total/directa, albúmina.
+  - Electrolitos y función renal (relevante en diarrea/deshidratación).
+  - Coproparasitoscópico, sangre oculta en heces, coprocultivo.
+  - Antígeno de H. pylori en heces / prueba de aliento.
+  - Panel nutricional: hierro/ferritina, vitamina B12, folato, vitamina D, zinc (relevante en falla de medro/malabsorción).
+  - Pruebas de función pancreática (elastasa fecal) si aplica.
+- **Salida hacia el motor de razonamiento**: el módulo no interpreta libremente; produce una lista estructurada de "hallazgos anormales con magnitud y contexto de edad" (ej. `calprotectina_fecal: 450 µg/g [alto; referencia <50 µg/g en >4 años]`). Esa lista estructurada es lo que se inyecta como contexto al RAG+LLM para que el diagnóstico diferencial la use y la cite, igual que citaría una guía.
+- **Bandera roja automática**: valores críticos (ej. hemoglobina muy baja, PCR muy elevada, transaminasas muy alteradas) disparan alerta inmediata igual que el checklist clínico de banderas rojas — no esperan al razonamiento del LLM.
+- **Nunca inventar un valor faltante**: si un lab no fue aportado, el sistema debe decir explícitamente "no disponible" y, si es relevante para el diferencial, sugerir solicitarlo — nunca asumir un valor.
+
+### 5.4 Pipeline de ingestión de conocimiento
 1. Curación por gastroenterólogo pediatra (obligatorio, no automatizable).
 2. Conversión a texto estructurado + metadatos (fuente, año, nivel de evidencia, población aplicable — ej. "solo lactantes 0-6 meses").
 3. Chunking semántico + generación de embeddings.
@@ -148,12 +170,12 @@ Componentes adicionales:
 
 ## 6. Flujo clínico del asistente (cómo se usa en consulta)
 
-1. **Captura de datos estructurados**: edad, peso, talla, percentiles automáticos, motivo de consulta, antecedentes, síntomas guiados por checklist (no solo texto libre — reduce omisiones).
-2. **Triage automático de banderas rojas** (motor de reglas, no LLM): si hay signos de alarma, se muestra alerta inmediata y prioridad de derivación urgente, ANTES de cualquier razonamiento diferencial.
-3. **Generación de diagnóstico diferencial**: el LLM+RAG propone una lista rankeada de posibilidades con:
+1. **Captura de datos estructurados**: edad, peso, talla, percentiles automáticos, motivo de consulta, antecedentes, síntomas guiados por checklist (no solo texto libre — reduce omisiones), **y resultados de laboratorio si el paciente los trae** (ver 5.3) — opcional, el flujo continúa igual si no hay.
+2. **Triage automático de banderas rojas** (motor de reglas, no LLM): combina signos/síntomas clínicos Y valores críticos de laboratorio; si hay alguno, se muestra alerta inmediata y prioridad de derivación urgente, ANTES de cualquier razonamiento diferencial.
+3. **Generación de diagnóstico diferencial**: el LLM+RAG propone una lista rankeada de posibilidades usando síntomas + antecedentes + hallazgos de laboratorio estructurados (cuando existen), con:
    - Probabilidad relativa (cualitativa: alta/media/baja, no un falso "% de certeza").
    - Evidencia/guía que sustenta cada opción.
-   - Qué estudio o dato adicional ayudaría a discriminar.
+   - Qué estudio o dato adicional (incluyendo qué laboratorio pedir) ayudaría a discriminar entre las opciones.
 4. **Sugerencias de manejo**: basadas en guía, con dosis calculadas por el motor determinístico (nunca generadas por el LLM en texto libre).
 5. **Registro y trazabilidad**: toda sesión queda registrada localmente (cifrada) para auditoría y aprendizaje continuo, con consentimiento informado.
 6. **El médico decide y firma**: el sistema nunca cierra el caso ni prescribe sin la validación humana explícita.
@@ -214,6 +236,7 @@ Sin este proceso, el sistema es un prototipo interesante, no una herramienta cl�
 
 ### Fase 2 — MVP funcional (8-12 semanas)
 - LLM local + RAG integrado.
+- Módulo de interpretación de laboratorios (rangos de referencia pediátricos + clasificación normal/anormal/crítico).
 - UI de consulta (anamnesis estructurada + chat).
 - Registro local cifrado.
 - Despliegue funcional en Raspberry Pi/Jetson.
